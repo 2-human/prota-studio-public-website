@@ -13,6 +13,7 @@
 <link rel="apple-touch-icon" href="/brand/assets/prota-brandmark-favicon-large.png" />
 <meta property="og:title" content="Schedule a Call with Vernon Steward, Prota Studios CEO" />
 <meta property="og:description" content="Pick a time directly on Vernon Steward's calendar." />
+<meta property="og:image" content="/brand/assets/vernon-steward.jpg" />
 <meta property="og:type" content="website" />
 <style>
   /* Calendar embed: tall enough to fit Google's appointment scheduler so no
@@ -37,20 +38,49 @@
   @media (max-width: 600px) {
     .calendar-wrap iframe { height: 2000px; }
   }
-  /* Personal-page header treatment */
-  .person-header {
-    text-align: center;
-    margin-bottom: 24px;
+  /* Two-column hero: text left, photo right. Stacks on mobile. */
+  .person-hero {
+    display: grid;
+    grid-template-columns: 1.1fr 1fr;
+    gap: 56px;
+    align-items: center;
   }
-  .person-header h1 {
-    margin: 0 0 8px;
+  .person-hero .text h1 {
+    margin: 12px 0 8px;
     font-size: 44px;
     line-height: 1.1;
   }
-  .person-header .role {
+  .person-hero .text .role {
     font-size: 17px;
     color: var(--black-600);
     letter-spacing: 0.02em;
+    margin-bottom: 20px;
+  }
+  .person-hero .photo {
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    overflow: hidden;
+    border-radius: 12px;
+    background: var(--alt);
+  }
+  .person-hero .photo img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  @media (max-width: 800px) {
+    .person-hero {
+      grid-template-columns: 1fr;
+      gap: 28px;
+    }
+    .person-hero .photo {
+      max-width: 420px;
+      margin: 0 auto;
+    }
+    .person-hero .text {
+      text-align: center;
+    }
   }
 </style>
 </head>
@@ -71,14 +101,19 @@
 </nav>
 
 <section class="block">
-  <div class="container-narrow">
-    <span class="eyebrow">Direct booking</span>
-    <div class="person-header">
-      <h1>Vernon Steward</h1>
-      <div class="role">CEO, Prota Studios</div>
+  <div class="container">
+    <div class="person-hero">
+      <div class="text">
+        <span class="eyebrow">Direct booking</span>
+        <h1>Vernon Steward</h1>
+        <div class="role">CEO, Prota Studios</div>
+        <p class="lede">Allow me to introduce myself and Prota Studios.</p>
+        <p>I run our nimble team of designers, developers, marketers and innovators. Whether you are a startup looking to gain traction, or in Enterprise product or marketing looking to test and launch something new, we can help.</p>
+      </div>
+      <div class="photo">
+        <img src="/brand/assets/vernon-steward.jpg" alt="Vernon Steward, CEO of Prota Studios" loading="lazy" />
+      </div>
     </div>
-    <p class="lede">Allow me to introduce myself and Prota Studios.</p>
-    <p>I run our nimble team of designers, developers, marketers and innovators. Whether you are a startup looking to gain traction, a blockchain looking to incubate a builder community, or in Enterprise product or marketing looking to test and launch something new, we can help.</p>
   </div>
 </section>
 
