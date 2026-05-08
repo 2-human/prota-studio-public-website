@@ -1,27 +1,22 @@
 // Prota Studios — contact-form Firebase config
 //
-// FIREBASE_CONFIG: paste the public client config from your new Firebase project
-//   (Firebase Console → Project settings → Your apps → SDK setup → Config).
-//   It is safe to commit this to the public repo; Firebase's security model is
-//   enforced by Realtime Database rules, not by hiding the apiKey.
+// FIREBASE_CONFIG: live Web App config from the prota-studios-87dd8 project.
+//   Safe to commit publicly; security is enforced by Realtime Database rules.
 //
-// PROJECT_REGION: should be us-central1 (or another US Firebase RTDB region) per
-//   the user's directive on hosting region.
-//
-// CONTACTS_PATH: the RTDB node where contact submissions land. Each submission
-//   is a push() child with an auto-generated ID (so submissions are never
-//   overwritten, unlike a per-email upsert pattern).
+// CONTACTS_PATH: RTDB node where submissions land. Each submission is a
+//   push() child with an auto-generated ID, so submissions are never
+//   overwritten.
 
 window.PROTA_CONTACT_CONFIG = {
   FIREBASE_CONFIG: {
-    apiKey: "REPLACE_WITH_REAL_API_KEY",
-    authDomain: "prota-studios-contacts.firebaseapp.com",
-    databaseURL: "https://prota-studios-contacts-default-rtdb.firebaseio.com",
-    projectId: "prota-studios-contacts",
-    storageBucket: "prota-studios-contacts.firebasestorage.app",
-    messagingSenderId: "REPLACE_WITH_SENDER_ID",
-    appId: "REPLACE_WITH_APP_ID",
+    apiKey: "AIzaSyB_NweRqniNYD-dAA1BLwZ3IetHVJDM8ko",
+    authDomain: "prota-studios-87dd8.firebaseapp.com",
+    databaseURL: "https://prota-studios-87dd8-default-rtdb.firebaseio.com",
+    projectId: "prota-studios-87dd8",
+    storageBucket: "prota-studios-87dd8.firebasestorage.app",
+    messagingSenderId: "288182878069",
+    appId: "1:288182878069:web:ec9968d3a63dc9ef9bdd3c",
   },
   CONTACTS_PATH: "contacts",
-  ENABLED: false,  // flip to true once the real config is pasted in above
+  ENABLED: true,
 };
