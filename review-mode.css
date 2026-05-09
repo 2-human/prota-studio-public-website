@@ -1,0 +1,371 @@
+/* review-mode.css
+ *
+ * Loaded only when ?review=1 is present in the URL.
+ * Provides the "+" hover pill, comment modal, sidebar drawer,
+ * and review-mode banner.
+ *
+ * Designed to be additive: doesn't override site.css, doesn't
+ * affect normal pages. All rules namespaced under [data-review-mode].
+ */
+
+[data-review-mode="on"] {
+  /* Reserve space on the right for the sidebar */
+  --review-sidebar-width: 360px;
+}
+
+@media (min-width: 1280px) {
+  [data-review-mode="on"] body {
+    padding-right: var(--review-sidebar-width);
+  }
+}
+
+/* ============== Banner ============== */
+.review-banner {
+  position: fixed;
+  top: 0; left: 0; right: var(--review-sidebar-width, 0);
+  z-index: 9999;
+  background: linear-gradient(90deg, #1F3864 0%, #2a4a82 100%);
+  color: white;
+  padding: 10px 20px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.15);
+}
+@media (max-width: 1279px) {
+  .review-banner { right: 0; }
+}
+.review-banner .dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  background: #4ade80;
+  border-radius: 50%;
+  margin-right: 8px;
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.review-banner a {
+  color: white;
+  text-decoration: underline;
+  font-weight: 500;
+  margin-left: 16px;
+}
+.review-banner a:hover { opacity: 0.85; }
+
+/* Add top padding for the banner */
+[data-review-mode="on"] body { padding-top: 40px; }
+
+/* ============== Annotatable elements ============== */
+[data-review-mode="on"] [data-comment-id] {
+  position: relative;
+  transition: outline 0.15s;
+}
+
+[data-review-mode="on"] [data-comment-id]:hover {
+  outline: 2px dashed #1F3864;
+  outline-offset: 4px;
+}
+
+[data-review-mode="on"] [data-comment-id].has-comment {
+  outline: 2px solid #f59e0b;
+  outline-offset: 4px;
+}
+
+[data-review-mode="on"] [data-comment-id].has-applied-comment {
+  outline: 2px solid #4ade80;
+  outline-offset: 4px;
+}
+
+/* ============== Pill button ============== */
+.review-pill {
+  position: absolute;
+  bottom: -14px;
+  right: 0;
+  z-index: 100;
+  background: #1F3864;
+  color: white;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  font-size: 18px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, transform 0.15s;
+  border: 2px solid white;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+  user-select: none;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-weight: 600;
+}
+[data-review-mode="on"] [data-comment-id]:hover .review-pill,
+.review-pill.has-comment {
+  opacity: 1;
+}
+.review-pill.has-comment {
+  background: #f59e0b;
+}
+.review-pill.has-applied-comment {
+  background: #4ade80;
+}
+.review-pill:hover {
+  transform: scale(1.1);
+}
+
+/* ============== Modal ============== */
+.review-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.5);
+  backdrop-filter: blur(4px);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+}
+.review-modal {
+  background: white;
+  border-radius: 12px;
+  padding: 28px;
+  width: 100%;
+  max-width: 560px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+.review-modal h3 {
+  margin: 0 0 6px;
+  font-size: 17px;
+  color: #1F3864;
+}
+.review-modal .anchor-info {
+  font-size: 12px;
+  color: #64748b;
+  font-family: ui-monospace, SF Mono, monospace;
+  margin-bottom: 18px;
+  padding: 8px 10px;
+  background: #f1f5f9;
+  border-radius: 6px;
+  word-break: break-all;
+}
+.review-modal .anchor-preview {
+  font-size: 13px;
+  color: #475569;
+  margin-bottom: 18px;
+  font-style: italic;
+  border-left: 3px solid #cbd5e1;
+  padding-left: 12px;
+}
+.review-modal label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+  margin: 14px 0 6px;
+}
+.review-modal label .opt {
+  font-weight: 400;
+  color: #94a3b8;
+  font-size: 12px;
+}
+.review-modal textarea {
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 70px;
+  box-sizing: border-box;
+}
+.review-modal textarea:focus {
+  outline: none;
+  border-color: #1F3864;
+  box-shadow: 0 0 0 3px rgba(31, 56, 100, 0.1);
+}
+.review-modal .actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+  justify-content: flex-end;
+}
+.review-modal button {
+  border: none;
+  border-radius: 6px;
+  padding: 9px 18px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+}
+.review-modal button.primary { background: #1F3864; color: white; }
+.review-modal button.primary:hover { background: #142646; }
+.review-modal button.secondary { background: #e2e8f0; color: #334155; }
+.review-modal button.secondary:hover { background: #cbd5e1; }
+.review-modal .error {
+  color: #dc2626;
+  font-size: 13px;
+  margin-top: 10px;
+}
+
+/* ============== Sidebar ============== */
+.review-sidebar {
+  position: fixed;
+  top: 0; right: 0;
+  width: var(--review-sidebar-width, 360px);
+  height: 100vh;
+  background: white;
+  border-left: 1px solid #e2e8f0;
+  z-index: 9998;
+  overflow-y: auto;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+}
+@media (max-width: 1279px) {
+  .review-sidebar {
+    transform: translateX(100%);
+    transition: transform 0.2s;
+  }
+  .review-sidebar.open {
+    transform: translateX(0);
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.15);
+  }
+}
+.review-sidebar header {
+  padding: 14px 18px;
+  border-bottom: 1px solid #e2e8f0;
+  font-weight: 600;
+  color: #1F3864;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.review-sidebar header .count { color: #94a3b8; font-weight: 400; font-size: 12px; }
+.review-sidebar .filter-row {
+  padding: 8px 18px;
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.review-sidebar .filter-row button {
+  border: 1px solid #cbd5e1;
+  background: white;
+  border-radius: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: #475569;
+  font-family: inherit;
+}
+.review-sidebar .filter-row button.active {
+  background: #1F3864;
+  color: white;
+  border-color: #1F3864;
+}
+.review-sidebar .empty {
+  padding: 32px 24px;
+  text-align: center;
+  color: #94a3b8;
+}
+.review-sidebar .comments {
+  flex: 1;
+  overflow-y: auto;
+}
+.review-comment {
+  padding: 14px 18px;
+  border-bottom: 1px solid #f1f5f9;
+  cursor: pointer;
+}
+.review-comment:hover { background: #f8fafc; }
+.review-comment .anchor {
+  font-family: ui-monospace, SF Mono, monospace;
+  font-size: 11px;
+  color: #94a3b8;
+}
+.review-comment .text {
+  margin-top: 4px;
+  color: #1e293b;
+  line-height: 1.45;
+}
+.review-comment .replacement {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: #fef3c7;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #78350f;
+  border-left: 3px solid #f59e0b;
+}
+.review-comment .meta {
+  margin-top: 6px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: #64748b;
+}
+.review-comment .meta .status {
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: #fef3c7;
+  color: #78350f;
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+.review-comment .meta .status.applied { background: #d1fae5; color: #065f46; }
+.review-comment .meta .status.dismissed { background: #f1f5f9; color: #64748b; }
+.review-comment.applied .text { color: #94a3b8; text-decoration: line-through; }
+.review-comment.dismissed { opacity: 0.55; }
+.review-sidebar-toggle {
+  position: fixed;
+  top: 50px;
+  right: 0;
+  z-index: 9997;
+  background: #1F3864;
+  color: white;
+  border: none;
+  padding: 10px 8px;
+  border-radius: 6px 0 0 6px;
+  cursor: pointer;
+  font-size: 12px;
+  writing-mode: vertical-lr;
+  text-orientation: mixed;
+  font-family: inherit;
+}
+@media (min-width: 1280px) { .review-sidebar-toggle { display: none; } }
+
+/* Toast ============== */
+.review-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1F3864;
+  color: white;
+  padding: 10px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  z-index: 10001;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  animation: toastIn 0.2s, toastOut 0.2s 2.6s forwards;
+}
+@keyframes toastIn { from { transform: translate(-50%, 20px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
+@keyframes toastOut { to { transform: translate(-50%, 20px); opacity: 0; } }
