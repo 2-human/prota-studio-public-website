@@ -20,6 +20,14 @@ import {
   update,
 } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-database.js";
 
+// Module-level state. Must be declared before init() runs since init()
+// (called below) accesses state synchronously via closures.
+const state = {
+  comments: [],
+  filter: "open",
+  error: null,
+};
+
 const cfg = window.PROTA_CONTACT_CONFIG;
 if (!cfg || !cfg.FIREBASE_CONFIG) {
   console.error("[review-mode] missing PROTA_CONTACT_CONFIG.FIREBASE_CONFIG");
@@ -76,12 +84,6 @@ function init() {
   // Expose helpers for debugging
   window.__review = { state, db };
 }
-
-const state = {
-  comments: [],
-  filter: "open",
-  error: null,
-};
 
 // =================================================================
 // Anchor assignment
