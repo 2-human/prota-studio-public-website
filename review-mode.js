@@ -91,20 +91,46 @@ function computePageSlug(pathname) {
 }
 
 function assignAnchors(pageSlug) {
-  // Walk the body, collect content elements. We skip nav, footer, header,
-  // form, banner, and anything with role="presentation".
-  const SKIP_SELECTOR = "nav.top, footer.site, .review-banner, .review-sidebar, .review-modal-backdrop, form, [data-review-skip]";
-  const ANCHOR_TAGS = ["h1", "h2", "h3", "h4", "p", "li", "summary"];
-  const counters = {};
-  ANCHOR_TAGS.forEach((t) => (counters[t] = 0));
+  // Annotate every meaningful content element on the page so Vernon can
+  // comment on anything visible — including buttons, nav links, footer
+  // links, labels, icons, and images. Skips only the widget itself,
+  // form inputs (which Vernon shouldn't comment on the form fields,
+  // only on the labels around them), and explicit opt-outs.
+  const SKIP_SELECTOR = ".review-banner, .review-sidebar, .review-sidebar-toggle, .review-modal-backdrop, .review-pill, [data-review-skip], input, textarea, select, option, script, style";
 
-  const all = document.body.querySelectorAll(ANCHOR_TAGS.join(","));
-  all.forEach((el) => {
+  // Step 1: wrap each <img> in a relatively-positioned span so the pill
+  // can anchor next to the image. Skips images already inside the
+  // widget itself.
+  document.querySelectorAll("img").forEach((img) => {
+    if (img.closest(SKIP_SELECTOR)) return;
+    if (img.parentElement && img.parentElement.classList.contains("review-img-wrap")) return;
+    const wrap = document.createElement("span");
+    wrap.className = "review-img-wrap";
+    wrap.style.cssText = "display: inline-block; position: relative; line-height: 0; max-width: 100%;";
+    img.parentNode.insertBefore(wrap, img);
+    wrap.appendChild(img);
+  });
+
+  // Step 2: collect annotatable elements
+  const TAGS = ["h1","h2","h3","h4","h5","h6","p","li","summary","a","button","label","blockquote","figcaption","details"];
+  const SPAN_SELECTORS = ["span.eyebrow","span.chip","span.lede","span.muted","span.tagline","span.role","span.section","span.copyright"];
+  const selector = TAGS.join(",") + "," + SPAN_SELECTORS.join(",") + ",.review-img-wrap";
+
+  const counters = {};
+  document.body.querySelectorAll(selector).forEach((el) => {
     if (el.closest(SKIP_SELECTOR)) return;
-    if (el.textContent.trim().length < 4) return; // skip tiny / empty
-    const tag = el.tagName.toLowerCase();
-    counters[tag] += 1;
-    const id = `${pageSlug}-${tag}-${counters[tag]}`;
+    if (el.hasAttribute("data-comment-id")) return;
+
+    // For non-image elements, require some text content
+    const isImgWrap = el.classList.contains("review-img-wrap");
+    if (!isImgWrap) {
+      const text = el.textContent.trim();
+      if (text.length < 2) return;
+    }
+
+    const key = isImgWrap ? "img" : el.tagName.toLowerCase();
+    counters[key] = (counters[key] || 0) + 1;
+    const id = `${pageSlug}-${key}-${counters[key]}`;
     el.setAttribute("data-comment-id", id);
   });
 }
