@@ -61,6 +61,12 @@
 /* Add top padding for the banner */
 [data-review-mode="on"] body { padding-top: 40px; }
 
+/* The site nav is position: sticky top:0. Without this offset, the
+   banner (also top:0, z-index 9999) overlaps the nav and steals
+   clicks on the logo + nav links. Push the sticky nav down past
+   the banner. */
+[data-review-mode="on"] nav.top { top: 40px; }
+
 /* ============== Annotatable elements ============== */
 [data-review-mode="on"] [data-comment-id] {
   position: relative;
