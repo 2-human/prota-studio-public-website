@@ -233,7 +233,7 @@ function assignAnchors(pageSlug) {
   // links, labels, icons, and images. Skips only the widget itself,
   // form inputs (which Vernon shouldn't comment on the form fields,
   // only on the labels around them), and explicit opt-outs.
-  const SKIP_SELECTOR = ".review-banner, .review-sidebar, .review-sidebar-toggle, .review-modal-backdrop, .review-pill, [data-review-skip], input, textarea, select, option, script, style";
+  const SKIP_SELECTOR = ".review-banner, .review-sidebar, .review-sidebar-toggle, .review-modal-backdrop, .review-pill, .review-pill-container, [data-review-skip], input, textarea, select, option, script, style";
 
   // Step 1: wrap each <img> in a relatively-positioned span so the pill
   // can anchor next to the image. Skips images already inside the
@@ -371,9 +371,16 @@ function slugifyText(text) {
 function wireAnchors() {
   const all = document.body.querySelectorAll("[data-comment-id]");
   all.forEach((el) => {
-    // Pill (only created on first hover; lazy)
+    // Pill (only created on first hover; lazy). The pill lives inside a
+    // .review-pill-container span — per library/features/review-widget/
+    // css-isolation.md §"Has-comment element outline + hover pill", the
+    // container takes pointer-events: none so the empty wrapper doesn't
+    // intercept host-element clicks; the pill itself takes pointer-events:
+    // auto when visible.
     el.addEventListener("mouseenter", () => {
-      if (!el.querySelector(".review-pill")) {
+      if (!el.querySelector(".review-pill-container")) {
+        const container = document.createElement("span");
+        container.className = "review-pill-container";
         const pill = document.createElement("button");
         pill.className = "review-pill";
         pill.type = "button";
@@ -384,7 +391,8 @@ function wireAnchors() {
           e.stopPropagation();
           openModal(el, null);
         });
-        el.appendChild(pill);
+        container.appendChild(pill);
+        el.appendChild(container);
         // Pill visibility for elements that already have comments
         decoratePill(el, pill);
       }
@@ -442,8 +450,8 @@ function openModal(el, existingComment) {
       <textarea name="replacement" rows="4" placeholder="${escapeHtml(LABELS.modalReplacementPlaceholder)}"></textarea>
       <div class="error" style="display:none"></div>
       <div class="actions">
-        <button type="button" class="secondary" data-cancel>${escapeHtml(LABELS.modalCancel)}</button>
-        <button type="button" class="primary" data-submit>${submitText}</button>
+        <button type="button" class="review-btn review-btn--secondary" data-cancel>${escapeHtml(LABELS.modalCancel)}</button>
+        <button type="button" class="review-btn review-btn--primary" data-submit>${submitText}</button>
       </div>
     </div>`;
   document.body.appendChild(backdrop);
@@ -701,15 +709,15 @@ function renderCommentList() {
     const target = document.querySelector(`[data-comment-id="${cssEscape(anchor)}"]`);
     if (!target) return;
     target.scrollIntoView({ behavior: "smooth", block: "center" });
-    document.querySelectorAll(".review-spotlight").forEach((el) => {
-      el.classList.remove("review-spotlight");
+    document.querySelectorAll(".review-spotlit").forEach((el) => {
+      el.classList.remove("review-spotlit");
     });
     // eslint-disable-next-line no-unused-expressions
     void target.offsetWidth;
-    target.classList.add("review-spotlight");
+    target.classList.add("review-spotlit");
     clearTimeout(window.__reviewSpotlightTimer);
     window.__reviewSpotlightTimer = setTimeout(() => {
-      target.classList.remove("review-spotlight");
+      target.classList.remove("review-spotlit");
     }, 4000);
   }
 
