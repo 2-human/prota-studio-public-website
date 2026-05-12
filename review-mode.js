@@ -1,15 +1,23 @@
 // review-mode.js
 //
-// Live-site review widget za odvaz public surfaces (počevši sa /susreti/).
+// Re-composed 2026-05-15 against library/features/review-widget atomics
+// (organization-template upstream commits f40cbe7..192de33):
 //
-// Activated by ?review=1. Auto-anchors data-comment-id to every
-// content element (h1-h4, p, li inside <main>/<section>). Hover-to-pill,
-// click-to-comment. Comments stored at /comments/{push-id} in Firebase RTDB.
+//   - comment-lifecycle.md       (3-state: pending/applied/archived + commentLifecycleMode)
+//   - pending-archived-workflow  (3 filter tabs: active/applied/archived + groupStatus)
+//   - anchor-strategy.md         (canonical ANCHOR_TAGS; pageSlug-{tag}-{n})
+//   - anchor-extensibility.md    (ANCHOR_TAGS_EXTRA + [data-comment-target] + MutationObserver)
+//   - commentable-everything.md  (commentableContent + chromeAnchored + CHROME_COUNTERS)
+//   - firebase-rtdb-adapter.md   (broad subscribe + client-side filter; status-enum write)
+//   - spotlight-on-click.md      (single-spotlight policy)
+//   - pill-hover-deepest.md      (:has() deepest-only + display:none baseline)
+//   - css-isolation.md           (chrome-roots only; per-action suffix classes; class state)
+//   - intl-plural-labels.md      (formatCount; LABELS.locale)
+//   - inert-entry-button.md      (lives in review-bootstrap.js)
 //
-// Visibility: bilo koji reviewer na URL-u sa flagom vidi sidebar drawer
-// sa listom komentara za trenutnu stranu, sa status workflow-om (open /
-// applied / dismissed / reopen). Na javnoj stranici (bez ?review=1),
-// widget je inertan.
+// Activated by ?review=1. Comments stored at /comments/{push-id} in Firebase RTDB
+// (broad subscribe + client-side filter by `page` and the `__chrome__` cross-page
+// bucket). Reader shim normalizes legacy boolean-archived records to the enum.
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
 import {
@@ -20,36 +28,43 @@ import {
   update,
 } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-database.js";
 
-// Module-level state. Must be declared before init() runs since init()
-// (called below) accesses state synchronously via closures.
+// =================================================================
+// Module-level state. Declared before init() runs since init() (called
+// below at module load) accesses state synchronously via closures.
+// =================================================================
+
 const state = {
   comments: [],
-  filter: "active", // "active" | "applied" | "archived"
+  filter: "active",          // 'active' | 'applied' | 'archived'  (filter-tab key — NOT status-enum)
   error: null,
+  pageSlug: null,
+  cfg: null,
+  anchorObserver: null,      // MutationObserver, disconnected on exit
+  commentableContent: "allowlist", // 'allowlist' | 'direct-text'
+  chromeAnchored: false,
 };
 
-// ---------- Comment lifecycle helpers (shared) ----------
-// Comment shape u Firebase RTDB:
-//   /comments/{push-id}
-//     page, anchor, comment, replacement, text_preview, url, timestamp,
-//     user_agent
-//     status:  'pending' | 'applied' | 'archived'  — canonical enum
-//     applied_at:  number  — timestamp transitioned to applied
-//     archived_at: number  — timestamp transitioned to archived
-//     edited_at:   number  — timestamp last edited
-//
-// Reader-side shim: legacy records carry boolean `archived: true|false`
-// (pre-2026-05-12b) or `status: 'applied'|'dismissed'` (pre-shim). The
-// getStatus() helper normalizes all reads to the enum. Per
-// library/features/review-widget/comment-lifecycle.md §"Schema" and
-// §"Backward compatibility — reader-side shim". New writes use the
-// enum directly; the shim runs forever (or until a separate migration
-// pass walks /comments/ and rewrites every record — prota: done
-// 2026-05-13).
+// =================================================================
+// Status normalization — per comment-lifecycle.md §"Schema" and
+// §"Backward compatibility — reader-side shim". The 3-state enum
+// lives at c.status: 'pending' | 'applied' | 'archived'. Legacy
+// records may carry boolean `archived: true` or `applied: true`
+// (pre-2026-05-12b 2-state schema). We accept both shapes on read;
+// new writes use the enum directly. The shim runs forever (or until
+// a separate migration pass walks /comments/ and rewrites every
+// record — prota: done 2026-05-13). The isPending/isApplied/
+// isArchived helpers below are thin sugar over getStatus.
+// =================================================================
+
 function getStatus(c) {
+  if (!c) return "pending";
+  // Enum first — canonical post-2026-05-12b shape
   if (c.status === "pending" || c.status === "applied" || c.status === "archived") return c.status;
+  // Legacy boolean shapes
   if (c.archived === true) return "archived";
   if (c.applied === true) return "applied";
+  // Even-older string statuses ('applied'/'dismissed'/'open'/'reopen') from
+  // the pre-2-state era — boolean shapes above win first.
   if (c.status === "applied") return "applied";   // legacy enum value
   if (c.status === "dismissed") return "archived"; // legacy enum value
   return "pending";
@@ -58,21 +73,24 @@ function isPending(c)  { return getStatus(c) === "pending"; }
 function isApplied(c)  { return getStatus(c) === "applied"; }
 function isArchived(c) { return getStatus(c) === "archived"; }
 
-// ---------- Labels (localizable via cfg.REVIEW_LABELS) ----------
-// English defaults. Projects override via window.{CONFIG}.REVIEW_LABELS:
-//   window.PROTA_CONTACT_CONFIG = {
-//     FIREBASE_CONFIG: {...},
-//     REVIEW_LABELS: {
-//       activeTab: "Aktivni",
-//       archiveTab: "Arhiva",
-//       commentsCount: { one: "{n} komentar", few: "{n} komentara", other: "{n} komentara" },
-//       locale: "sr",
-//       // ...override any keys; unspecified ones fall back to English.
-//     }
-//   };
-// `locale` controls Intl.PluralRules form selection. `commentsCount`
-// (and any future plural-aware string) uses the locale's plural categories
-// (e.g. en: "one"/"other"; sr: "one"/"few"/"other").
+// =================================================================
+// Group-level status (per pending-archived-workflow.md §"Sidebar filter
+// tabs"). MUST return one of the filter-tab keys, NOT a status-enum
+// value. See comment-lifecycle.md §"Vocabulary bridge".
+// =================================================================
+
+function groupStatus(groupComments) {
+  const nonArchived = groupComments.filter((c) => getStatus(c) !== "archived");
+  if (nonArchived.length === 0) return "archived";
+  const allApplied = nonArchived.every((c) => getStatus(c) === "applied");
+  if (allApplied) return "applied";
+  return "active";
+}
+
+// =================================================================
+// Labels (localizable via cfg.REVIEW_LABELS). English defaults.
+// =================================================================
+
 const DEFAULT_LABELS = {
   locale: "en",
   // Pill / element interaction
@@ -81,15 +99,16 @@ const DEFAULT_LABELS = {
   bannerText: "Review mode",
   bannerHint: "click any element to leave a comment",
   bannerClose: "Close",
-  // Sidebar header + filter tabs
+  // Sidebar header + filter tabs (three tabs per the 3-state lifecycle)
   sidebarTitle: "Comments on this page",
   activeTab: "Active",
   appliedTab: "Applied",
   archiveTab: "Archive",
   // Empty states
   noCommentsYet: 'No comments yet. Hover over any element and click "+".',
-  emptyArchive: 'Archive is empty. Comments are archived when you click "Mark as done".',
   noActiveComments: 'No active comments yet. Hover over any element and click "+".',
+  emptyApplied: "No applied comments yet.",
+  emptyArchive: "Archive is empty.",
   // DB error
   dbReadErrorPrefix: "Error reading database: ",
   dbReadErrorHint: "Likely missing a read rule on /comments. Check Firebase rules.",
@@ -106,7 +125,7 @@ const DEFAULT_LABELS = {
   modalReplacementHint: "(optional — verbatim text if you have it)",
   modalReplacementPlaceholder: "(optional) exact replacement text…",
   modalRequiredError: "Comment or replacement suggestion is required.",
-  // Toggle button
+  // Toggle button (shared with inert-page entry button in bootstrap)
   toggleButton: "Comments",
   toggleButtonTitle: "Open comment review mode",
   // Group status badges
@@ -116,7 +135,9 @@ const DEFAULT_LABELS = {
   // Comment row meta
   editedPrefix: "edited",
   noAnchorFallback: "(no anchor)",
-  // Action buttons
+  // Action buttons — per comment-lifecycle.md §"Per-action class names".
+  // The 'full' set includes Apply / Archive; 'feedback-only' uses only the
+  // subset emitted in renderActions() below.
   applyLabel: "Apply",
   applyTitle: "Apply this comment (mark as acted on)",
   editLabel: "Edit",
@@ -142,15 +163,14 @@ const DEFAULT_LABELS = {
 };
 
 const cfg = window.PROTA_CONTACT_CONFIG;
+state.cfg = cfg;
 
-// LABELS = defaults merged with per-project overrides. Shallow merge except
-// `commentsCount` (and any nested label objects) get a single level of
-// nested merge so projects can override just `commentsCount.few` without
-// re-specifying every form.
+// LABELS = defaults merged with per-project overrides. One-level deep
+// merge for known nested keys so projects override individual plural
+// forms without re-specifying every form.
 const LABELS = (() => {
   const overrides = (cfg && cfg.REVIEW_LABELS) || {};
   const merged = Object.assign({}, DEFAULT_LABELS, overrides);
-  // One-level deep merge for known nested keys
   for (const key of ["commentsCount"]) {
     if (overrides[key] && typeof overrides[key] === "object") {
       merged[key] = Object.assign({}, DEFAULT_LABELS[key], overrides[key]);
@@ -159,9 +179,7 @@ const LABELS = (() => {
   return merged;
 })();
 
-// Plural-aware count formatter. Uses Intl.PluralRules on LABELS.locale
-// and looks up the matching form in `tmpl` ({one, two, few, many, other}).
-// Falls back to `tmpl.other`, then `tmpl.one`, then plain count.
+// Plural-aware count formatter — per intl-plural-labels.md.
 function formatCount(n, key) {
   const tmpl = LABELS[key];
   if (!tmpl || typeof tmpl !== "object") return String(n);
@@ -173,15 +191,76 @@ function formatCount(n, key) {
   return text.replace("{n}", String(n));
 }
 
-// Init only when Firebase config is present. Order matters: LABELS +
-// formatCount above are needed by render functions that init() calls
-// synchronously (renderBanner, renderSidebar, renderCommentList).
+// =================================================================
+// Config gates (per FEATURE.md §"Project-specific inputs"). Default
+// behavior is unchanged when keys are unset; opt-ins are per-project
+// and the in-memory `state` carries the resolved values for the rest
+// of the module.
+// =================================================================
+
+const lifecycleMode = (cfg && cfg.commentLifecycleMode) || "full";
+const isFeedbackOnly = lifecycleMode === "feedback-only";
+
+state.commentableContent = (cfg && cfg.commentableContent) || "allowlist";
+state.chromeAnchored = !!(cfg && cfg.chromeAnchored);
+
+// Canonical ANCHOR_TAGS — per anchor-strategy.md §"Which elements get
+// anchored". Curated tight list (does NOT include `div`, `a`, `button`,
+// etc.). Project-level extension via ANCHOR_TAGS_EXTRA below.
+const ANCHOR_TAGS = [
+  "h1", "h2", "h3", "h4", "h5", "h6",
+  "p", "li", "td", "th", "dt", "dd",
+  "strong", "em", "small", "span",
+  "section", "article", "aside", "header", "footer", "nav", "main", "figure",
+];
+
+// Per-project tag extension — per anchor-extensibility.md §1.
+const ANCHOR_TAGS_EXTRA = (cfg && Array.isArray(cfg.ANCHOR_TAGS_EXTRA))
+  ? cfg.ANCHOR_TAGS_EXTRA.slice()
+  : [];
+
+const ANCHOR_TAGS_EFFECTIVE = ANCHOR_TAGS.concat(ANCHOR_TAGS_EXTRA);
+
+// Curated deny-list for direct-text mode (per commentable-everything.md
+// §"NEVER_ANCHOR deny-list"). Also referenced in allowlist mode by
+// `tryAnchor()` as defense-in-depth.
+const NEVER_ANCHOR = new Set([
+  // Interactive form controls — pill click conflict + can't host children
+  "input", "select", "textarea", "option", "optgroup", "datalist",
+  "fieldset", "legend",
+  // Non-visual / metadata
+  "script", "style", "template", "noscript", "meta", "link", "title",
+  "head", "html", "body",
+  // SVG internals
+  "svg", "path", "circle", "rect", "ellipse", "polygon", "polyline",
+  "line", "g", "use", "defs", "symbol", "marker",
+  // Embedded content
+  "iframe", "embed", "object", "param",
+  // Void elements (no children possible)
+  "br", "hr", "img", "video", "audio", "source", "track", "picture",
+  // Layout-only table elements
+  "col", "colgroup",
+]);
+
+// =================================================================
+// Module-scoped sticky counters (per anchor-extensibility.md §"Counter
+// stickiness"). NEVER reset between init and MutationObserver-driven
+// passes — re-numbering would orphan existing comments.
+// =================================================================
+
+const ANCHOR_COUNTERS = Object.create(null);   // {tag: lastN} — per pageSlug-{tag}-{n}
+const CHROME_COUNTERS = Object.create(null);   // {tag: lastN} — per chrome-{tag}-{n}
+
+// =================================================================
+// Init guard. Order matters: LABELS + formatCount + getStatus declared
+// above so init() (called synchronously below) can use them.
+// =================================================================
+
 if (!cfg || !cfg.FIREBASE_CONFIG) {
   console.error("[review-mode] missing PROTA_CONTACT_CONFIG.FIREBASE_CONFIG");
 } else {
   init();
 }
-
 
 function init() {
   const app = initializeApp(cfg.FIREBASE_CONFIG, "review-mode");
@@ -189,38 +268,37 @@ function init() {
 
   document.documentElement.setAttribute("data-review-mode", "on");
 
-  // 1. Compute page slug from pathname.
-  // /                    → "home"
-  // /about/              → "about"
-  // /work/citi-ventures/ → "work-citi-ventures"
-  const pageSlug = computePageSlug(window.location.pathname);
+  // Page slug — per anchor-strategy.md §"The ID shape" pageSlug rule.
+  // /                    → 'home'
+  // /about/              → 'about'
+  // /work/citi-ventures/ → 'work-citi-ventures'
+  state.pageSlug = computePageSlug(window.location.pathname);
 
-  // 2. Auto-assign data-comment-id to every annotatable element.
-  // Stable IDs: {pageSlug}-{tag}-{n} where n is sequence within the
-  // page's content area. Survives small text edits but not reorders.
-  assignAnchors(pageSlug);
+  // Initial anchor pass over the content area. Chrome inclusion is
+  // gated by state.chromeAnchored.
+  anchorPage();
 
-  // 3. Render banner.
+  // Dynamic-content support — per anchor-extensibility.md §3.
+  setupDynamicAnchoring();
+
   renderBanner();
 
-  // 4. Render sidebar shell.
   const sidebar = renderSidebar();
   document.body.appendChild(sidebar);
 
-  // 5. Wire each annotatable element with a hover pill.
   wireAnchors();
 
-  // 6. Subscribe to all comments and filter client-side. The dataset
-  //    is small enough that client filtering is fine, and this removes
-  //    the dependency on the database having .indexOn set on /comments/page
-  //    (which would otherwise be required for the orderByChild query).
-  console.log("[review-mode] page slug:", pageSlug);
+  // Broad subscribe + client-side filter — per firebase-rtdb-adapter.md.
+  // Filter accepts records whose `page` is the current pageSlug OR the
+  // cross-page chrome bucket '__chrome__' (per commentable-everything.md
+  // §"Comment-read filter").
+  console.log("[review-mode] page slug:", state.pageSlug, "chrome:", state.chromeAnchored);
   const commentsRef = ref(db, "comments");
   onValue(commentsRef, (snap) => {
     const data = snap.val() || {};
     const all = Object.entries(data).map(([id, val]) => ({ id, ...val }));
-    state.comments = all.filter(c => c.page === pageSlug);
-    console.log(`[review-mode] ${all.length} total comments, ${state.comments.length} on this page`);
+    state.comments = all.filter((c) => c.page === state.pageSlug || c.page === "__chrome__");
+    console.log(`[review-mode] ${all.length} total, ${state.comments.length} on this page (+ chrome)`);
     renderCommentList();
     decorateAnchors();
   }, (err) => {
@@ -229,216 +307,282 @@ function init() {
     renderCommentList();
   });
 
-  // Expose za debugging + out-of-band akcije (Claude može da pozove
-  // archiveComments(['id1', 'id2']) iz konzole posle primene izmena).
+  // Debug + out-of-band actions (Claude can call window.__review.* from
+  // the console after applying changes in source — used by the
+  // feedback-only workflow that doesn't expose Apply/Archive in the UI).
   window.__review = {
     state, db,
-    archiveComments, unarchiveComment,
+    applyComment, archiveComment, archiveComments, restoreComment,
+    unarchiveComment: restoreComment,  // back-compat alias for the prior 2-state API
     editComment, deleteComment,
-    isArchived,
+    getStatus, groupStatus,
+    isPending, isApplied, isArchived,
   };
 }
 
 // =================================================================
-// Anchor assignment
+// Page slug
 // =================================================================
 
 function computePageSlug(pathname) {
-  const trimmed = pathname.replace(/^\/+|\/+$/g, "");
+  // Strip trailing /index.html or /index.htm
+  let p = pathname.replace(/\/index\.html?$/i, "/");
+  const trimmed = p.replace(/^\/+|\/+$/g, "");
   if (!trimmed) return "home";
   return trimmed.replace(/\//g, "-");
 }
 
-function assignAnchors(pageSlug) {
-  // Annotate every meaningful content element on the page so Vernon can
-  // comment on anything visible — including buttons, nav links, footer
-  // links, labels, icons, and images. Skips only the widget itself,
-  // form inputs (which Vernon shouldn't comment on the form fields,
-  // only on the labels around them), and explicit opt-outs.
-  const SKIP_SELECTOR = ".review-banner, .review-sidebar, .review-sidebar-toggle, .review-modal-backdrop, .review-pill, .review-pill-container, [data-review-skip], input, textarea, select, option, script, style";
+// =================================================================
+// Anchor pass — per anchor-strategy.md + anchor-extensibility.md +
+// commentable-everything.md. The full tag-list pass plus the
+// [data-comment-target] attribute pass.
+// =================================================================
 
-  // Step 1: wrap each <img> in a relatively-positioned span so the pill
-  // can anchor next to the image. Skips images already inside the
-  // widget itself.
-  document.querySelectorAll("img").forEach((img) => {
-    if (img.closest(SKIP_SELECTOR)) return;
-    if (img.parentElement && img.parentElement.classList.contains("review-img-wrap")) return;
+const WIDGET_CHROME_SELECTOR =
+  ".review-banner, .review-sidebar, .review-sidebar-toggle, " +
+  ".review-modal-backdrop, .review-modal, .review-toast, " +
+  ".review-pill, .review-pill-container, .review-toggle-btn, " +
+  "[data-review-skip], script, style";
+
+function isInWidgetChrome(el) {
+  return !!(el.closest && el.closest(WIDGET_CHROME_SELECTOR));
+}
+
+function isInSiteChrome(el) {
+  // Per commentable-everything.md §"isInSiteChrome(el)". `nav` + `footer`
+  // unconditionally; `header[role="banner"]` (semantic-banner role assertion;
+  // non-banner `<header>` inside an `<article>` is content, not chrome).
+  return !!(el.closest && el.closest('nav, header[role="banner"], footer'));
+}
+
+function selectContentArea() {
+  // Per anchor-strategy.md §"Content area scoping". When chromeAnchored:
+  // true (per commentable-everything.md), the area expands to document.body
+  // so the chrome-route gate in tryAnchor() actually has chrome to walk over.
+  if (state.chromeAnchored) return document.body;
+  const main = document.querySelector("main");
+  if (main) return main;
+  return document.body;
+}
+
+function hasDirectText(el) {
+  // Per commentable-everything.md §"hasDirectText(el)". Looks at the
+  // element's OWN text-node children (not descendants). `<div><p>x</p></div>`
+  // returns false (the `<div>`'s child is an element node, not a text node).
+  for (const child of el.childNodes) {
+    if (child.nodeType === Node.TEXT_NODE && child.textContent.trim().length >= 2) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function tryAnchor(el) {
+  // Per commentable-everything.md §"tryAnchor(el) — direct-text + chrome-aware"
+  // and anchor-extensibility.md §3. Decision points: widget-chrome skip,
+  // already-anchored skip, opt-out skip, mode-gated allowlist-vs-direct-text,
+  // chrome-route gate, ID assignment.
+
+  if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+  if (isInWidgetChrome(el)) return false;
+  if (el.hasAttribute("data-comment-id")) return false;
+  if (el.hasAttribute("data-review-skip")) return false;
+  const tag = el.tagName.toLowerCase();
+
+  // Wrap <img> in a span so the pill can anchor next to it. (Voids can't
+  // host children.) The wrapper carries `.review-img-wrap` and is what we
+  // actually anchor, with tag bucket 'img' for slug stability.
+  // Note: <img>s are processed by wrapImages() before tryAnchor() ever
+  // sees them, so the path here is for raw <img> elements that escape
+  // the initial pass (rare). The wrapper itself is matched below as a
+  // span with `.review-img-wrap` class.
+
+  // Mode-gated checks
+  if (state.commentableContent === "direct-text") {
+    if (NEVER_ANCHOR.has(tag)) return false;
+    if (!hasDirectText(el)) return false;
+  } else {
+    // 'allowlist' mode — canonical + extras + per-element opt-in
+    const matchesTag = ANCHOR_TAGS_EFFECTIVE.includes(tag);
+    const optedIn = el.hasAttribute("data-comment-target");
+    const isImgWrap = el.classList && el.classList.contains("review-img-wrap");
+    if (!matchesTag && !optedIn && !isImgWrap) return false;
+    if (NEVER_ANCHOR.has(tag)) return false;
+    if (!isImgWrap) {
+      const text = (el.textContent || "").trim();
+      if (text.length < 2) return false;
+    }
+  }
+
+  // Chrome-route gate
+  const inSiteChrome = isInSiteChrome(el);
+  if (inSiteChrome && !state.chromeAnchored) return false;
+
+  // ID assignment — chrome uses cross-page CHROME_COUNTERS, content uses
+  // page-scope ANCHOR_COUNTERS. Tag bucket for image-wraps is 'img' so
+  // the slug is `{pageSlug}-img-{n}` or `chrome-img-{n}`.
+  const bucket = (el.classList && el.classList.contains("review-img-wrap")) ? "img" : tag;
+  let id;
+  if (inSiteChrome) {
+    CHROME_COUNTERS[bucket] = (CHROME_COUNTERS[bucket] || 0) + 1;
+    id = `chrome-${bucket}-${CHROME_COUNTERS[bucket]}`;
+    el.setAttribute("data-chrome-anchor", "");
+  } else {
+    ANCHOR_COUNTERS[bucket] = (ANCHOR_COUNTERS[bucket] || 0) + 1;
+    id = `${state.pageSlug}-${bucket}-${ANCHOR_COUNTERS[bucket]}`;
+  }
+  el.setAttribute("data-comment-id", id);
+  return true;
+}
+
+function wrapImages(root) {
+  // Step 1 of the anchor pass — wrap every <img> so it can host a pill.
+  // Skips images already inside widget chrome, opt-outs, or an existing
+  // .review-img-wrap. Idempotent.
+  root.querySelectorAll("img").forEach((img) => {
+    if (isInWidgetChrome(img)) return;
+    if (img.hasAttribute("data-review-skip")) return;
+    if (img.parentElement && img.parentElement.classList &&
+        img.parentElement.classList.contains("review-img-wrap")) return;
     const wrap = document.createElement("span");
     wrap.className = "review-img-wrap";
-    wrap.style.cssText = "display: inline-block; position: relative; line-height: 0; max-width: 100%;";
-    img.parentNode.insertBefore(wrap, img);
-    wrap.appendChild(img);
-  });
-
-  // Step 2: collect annotatable elements
-  // Široka lista — bilo koji element koji sadrži smislen tekst može
-  // dobiti anchor (filter ispod skida prazne wrappere).
-  const TAGS = [
-    "h1","h2","h3","h4","h5","h6",
-    "p","li","summary","a","button","label",
-    "blockquote","figcaption","details",
-    "td","th","dt","dd",
-    "strong","em","b","i","u","mark","cite","q",
-    "small","code","pre","kbd","samp","var",
-    "span","time","abbr",
-    "div","section","article","aside","header","footer","nav","main","figure",
-  ];
-  const selector = TAGS.join(",") + ",.review-img-wrap";
-
-  const counters = {};
-  // Cross-page counters for elements inside nav/footer that don't have
-  // a stable identifier (e.g. the social-icon list items). Same on every
-  // page so the same N maps to the same element.
-  const navCounters = {};
-  const footerCounters = {};
-
-  document.body.querySelectorAll(selector).forEach((el) => {
-    if (el.closest(SKIP_SELECTOR)) return;
-    if (el.hasAttribute("data-comment-id")) return;
-
-    const isImgWrap = el.classList.contains("review-img-wrap");
-    if (!isImgWrap) {
-      const text = el.textContent.trim();
-      if (text.length < 2) return;
+    wrap.style.cssText =
+      "display: inline-block; position: relative; line-height: 0; max-width: 100%;";
+    if (img.parentNode) {
+      img.parentNode.insertBefore(wrap, img);
+      wrap.appendChild(img);
     }
-
-    let id = computeStableId(el, navCounters, footerCounters);
-    if (!id) {
-      const key = isImgWrap ? "img" : el.tagName.toLowerCase();
-      counters[key] = (counters[key] || 0) + 1;
-      id = `${pageSlug}-${key}-${counters[key]}`;
-    }
-    el.setAttribute("data-comment-id", id);
   });
 }
 
-// Stable cross-page anchor IDs for shared elements (nav, footer).
-// Returns null if the element is not in a shared region — caller falls
-// back to per-page sequence ID.
-function computeStableId(el, navCounters, footerCounters) {
-  if (el.closest("nav.top")) return computeNavId(el, navCounters);
-  if (el.closest("footer.site")) return computeFooterId(el, footerCounters);
-  return null;
+function anchorPage() {
+  const root = selectContentArea();
+  wrapImages(root);
+  anchorSubtree(root);
 }
 
-function computeNavId(el, counters) {
-  const tag = el.tagName.toLowerCase();
-  // Logo link <a class="logo">
-  if (tag === "a" && el.classList.contains("logo")) return "nav-logo";
-  // Logo image (wrapped in .review-img-wrap)
-  if (el.classList.contains("review-img-wrap") && el.closest(".logo")) return "nav-logo-img";
-  // CTA button: <a class="cta">
-  if (tag === "a" && el.classList.contains("cta")) {
-    return `nav-cta-${slugifyHref(el.getAttribute("href"))}`;
+function anchorSubtree(rootNode) {
+  // Walk the subtree breadth-first. The traversal order matters only
+  // insofar as document-order gives stable counters — querySelectorAll
+  // returns document-order natively.
+
+  if (state.commentableContent === "direct-text") {
+    // Direct-text mode — iterate every element and let tryAnchor decide.
+    const all = rootNode.querySelectorAll ? rootNode.querySelectorAll("*") : [];
+    all.forEach((el) => tryAnchor(el));
+    if (rootNode.nodeType === Node.ELEMENT_NODE) tryAnchor(rootNode);
+    return;
   }
-  // Regular nav link <a>
-  if (tag === "a") {
-    return `nav-link-${slugifyHref(el.getAttribute("href"))}`;
+
+  // Allowlist mode — two passes (tag-list, then attribute), de-duped by
+  // tryAnchor's already-anchored check.
+  for (const tag of ANCHOR_TAGS_EFFECTIVE) {
+    if (rootNode.tagName && rootNode.tagName.toLowerCase() === tag) {
+      tryAnchor(rootNode);
+    }
+    if (rootNode.querySelectorAll) {
+      rootNode.querySelectorAll(tag).forEach((el) => tryAnchor(el));
+    }
   }
-  // <li> wrapping a link — anchor by the link's href
-  if (tag === "li") {
-    const a = el.querySelector("a");
-    if (a) return `nav-item-${slugifyHref(a.getAttribute("href"))}`;
+  // Image wraps
+  if (rootNode.classList && rootNode.classList.contains("review-img-wrap")) {
+    tryAnchor(rootNode);
   }
-  // Fallback — sequence within nav by tag (consistent across pages
-  // because the nav HTML is identical)
-  counters[tag] = (counters[tag] || 0) + 1;
-  return `nav-${tag}-${counters[tag]}`;
+  if (rootNode.querySelectorAll) {
+    rootNode.querySelectorAll(".review-img-wrap").forEach((el) => tryAnchor(el));
+  }
+  // Per-element opt-in attribute
+  if (rootNode.matches && rootNode.matches("[data-comment-target]")) {
+    tryAnchor(rootNode);
+  }
+  if (rootNode.querySelectorAll) {
+    rootNode.querySelectorAll("[data-comment-target]").forEach((el) => tryAnchor(el));
+  }
 }
 
-function computeFooterId(el, counters) {
-  const tag = el.tagName.toLowerCase();
-  // Tagline paragraph
-  if (tag === "p" && el.classList.contains("tagline")) return "footer-tagline";
-  // Copyright block
-  if (el.classList.contains("copyright")) return "footer-copyright";
-  // Headings — slugify the text
-  if (["h3", "h4"].includes(tag)) {
-    return `footer-h-${slugifyText(el.textContent)}`;
-  }
-  // Footer links
-  if (tag === "a") {
-    return `footer-link-${slugifyHref(el.getAttribute("href"))}`;
-  }
-  // List items wrapping a link
-  if (tag === "li") {
-    const a = el.querySelector("a");
-    if (a) return `footer-item-${slugifyHref(a.getAttribute("href"))}`;
-  }
-  // Fallback — sequence within footer by tag
-  counters[tag] = (counters[tag] || 0) + 1;
-  return `footer-${tag}-${counters[tag]}`;
+function setupDynamicAnchoring() {
+  // Per anchor-extensibility.md §3 + §"Performance considerations".
+  // Scope is the content area (NOT document.body unless chromeAnchored:
+  // true, in which case content area IS document.body). Config is
+  // childList + subtree only.
+  const root = selectContentArea();
+  if (!root || !window.MutationObserver) return;
+  const observer = new MutationObserver((mutations) => {
+    for (const mut of mutations) {
+      for (const node of mut.addedNodes) {
+        if (!node || node.nodeType !== Node.ELEMENT_NODE) continue;
+        if (isInWidgetChrome(node)) continue;
+        // Process new images first so the wrap-and-anchor sequence is
+        // correct for dynamically inserted <img> tags.
+        wrapImages(node);
+        anchorSubtree(node);
+        // Pills need wiring for elements added after init
+        wireAnchorsIn(node);
+      }
+    }
+  });
+  observer.observe(root, { childList: true, subtree: true });
+  state.anchorObserver = observer;
 }
 
-function slugifyHref(href) {
-  if (!href) return "none";
-  // Strip protocol, leading/trailing slashes, replace non-word chars
-  return href
-    .replace(/^https?:\/\//, "")
-    .replace(/^\/+|\/+$/g, "")
-    .replace(/[^a-z0-9]+/gi, "-")
-    .replace(/^-+|-+$/g, "")
-    .toLowerCase() || "home";
-}
-
-function slugifyText(text) {
-  return (text || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 60) || "untitled";
-}
+// =================================================================
+// Pill wiring (lazy — created on first mouseenter per anchored element)
+// =================================================================
 
 function wireAnchors() {
   const all = document.body.querySelectorAll("[data-comment-id]");
-  all.forEach((el) => {
-    // Pill (only created on first hover; lazy). The pill lives inside a
-    // .review-pill-container span — per library/features/review-widget/
-    // css-isolation.md §"Has-comment element outline + hover pill", the
-    // container takes pointer-events: none so the empty wrapper doesn't
-    // intercept host-element clicks; the pill itself takes pointer-events:
-    // auto when visible.
-    el.addEventListener("mouseenter", () => {
-      if (!el.querySelector(".review-pill-container")) {
-        const container = document.createElement("span");
-        container.className = "review-pill-container";
-        const pill = document.createElement("button");
-        pill.className = "review-pill";
-        pill.type = "button";
-        pill.textContent = "+";
-        pill.title = LABELS.addCommentTitle;
-        pill.addEventListener("click", (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          openModal(el, null);
-        });
-        container.appendChild(pill);
-        el.appendChild(container);
-        // Pill visibility for elements that already have comments
-        decoratePill(el, pill);
-      }
+  all.forEach(wireOne);
+}
+
+function wireAnchorsIn(rootNode) {
+  if (rootNode.hasAttribute && rootNode.hasAttribute("data-comment-id")) {
+    wireOne(rootNode);
+  }
+  if (rootNode.querySelectorAll) {
+    rootNode.querySelectorAll("[data-comment-id]").forEach(wireOne);
+  }
+}
+
+function wireOne(el) {
+  if (el.__reviewWired) return;
+  el.__reviewWired = true;
+  el.addEventListener("mouseenter", () => {
+    if (el.querySelector(".review-pill-container")) return;
+    const container = document.createElement("span");
+    container.className = "review-pill-container";
+    const pill = document.createElement("button");
+    pill.className = "review-pill";
+    pill.type = "button";
+    pill.textContent = "+";
+    pill.title = LABELS.addCommentTitle;
+    pill.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openModal(el, null);
     });
+    container.appendChild(pill);
+    el.appendChild(container);
+    decoratePill(el, pill);
   });
 }
 
 function decorateAnchors() {
-  // Element-level status — per
-  // library/features/review-widget/css-isolation.md §"Has-comment outline"
-  // and library/features/review-widget/comment-lifecycle.md §"States".
-  //   any pending             → .has-comment (warm amber outline)
-  //   all non-archived applied → .has-applied-comment (sage outline)
-  //   all archived / none      → no class (default subtle dashed outline only)
+  // Per css-isolation.md §"Has-comment element outline + hover pill"
+  // and comment-lifecycle.md §"States". State is represented as a CLASS
+  // on the anchored element:
+  //   .has-comment         — group has any pending comments (warm amber outline)
+  //   .has-applied-comment — group's non-archived comments are all applied (sage outline)
+  //   (none)               — all archived or no comments (default subtle dashed outline only)
+  // Classes (not data attributes) so they compose cleanly with other
+  // state classes like .review-spotlit.
   document.querySelectorAll("[data-comment-id]").forEach((el) => {
     const id = el.getAttribute("data-comment-id");
-    const mine = state.comments.filter((c) => c.anchor === id);
-    const pending = mine.filter(isPending);
-    const applied = mine.filter(isApplied);
+    const groupComments = state.comments.filter((c) => c.anchor === id);
     el.classList.remove("has-comment", "has-applied-comment");
-    if (pending.length > 0) {
-      el.classList.add("has-comment");
-    } else if (applied.length > 0 && pending.length === 0) {
-      el.classList.add("has-applied-comment");
+    if (groupComments.length > 0) {
+      const gs = groupStatus(groupComments);
+      if (gs === "active") el.classList.add("has-comment");
+      else if (gs === "applied") el.classList.add("has-applied-comment");
     }
     const pill = el.querySelector(".review-pill");
     if (pill) decoratePill(el, pill);
@@ -446,21 +590,18 @@ function decorateAnchors() {
 }
 
 function decoratePill(el, pill) {
-  // Pill na hover prikazuje boju koja signalizuje status:
-  //   ima aktivnih → terakota (.has-comment)
-  //   inače → default forest (no class)
-  if (active.length) pill.classList.add("has-comment");
+  pill.classList.remove("has-comment", "has-applied-comment");
+  if (el.classList.contains("has-comment")) pill.classList.add("has-comment");
+  else if (el.classList.contains("has-applied-comment")) pill.classList.add("has-applied-comment");
 }
 
 // =================================================================
-// Modal
+// Modal — new + edit
 // =================================================================
 
-// Otvara modal za novi komentar (existingComment === null) ili edit
-// postojećeg (existingComment je objekat sa id, comment, replacement).
 function openModal(el, existingComment) {
   const id = el.getAttribute("data-comment-id");
-  const preview = el.textContent.trim().slice(0, 200);
+  const preview = (el.textContent || "").trim().slice(0, 200);
   const isEdit = !!existingComment;
 
   const titleText = isEdit ? LABELS.modalTitleEdit : LABELS.modalTitleNew;
@@ -472,7 +613,7 @@ function openModal(el, existingComment) {
   backdrop.className = "review-modal-backdrop";
   backdrop.innerHTML = `
     <div class="review-modal" role="dialog">
-      <h3>${titleText}</h3>
+      <h3>${escapeHtml(titleText)}</h3>
       <div class="anchor-info">${escapeHtml(id)}</div>
       <div class="anchor-preview">"${escapeHtml(preview)}${preview.length === 200 ? "…" : ""}"</div>
       <label>${escapeHtml(LABELS.modalCommentLabel)} <span class="opt">${escapeHtml(LABELS.modalCommentHint)}</span></label>
@@ -482,12 +623,11 @@ function openModal(el, existingComment) {
       <div class="error" style="display:none"></div>
       <div class="actions">
         <button type="button" class="review-btn review-btn--secondary" data-cancel>${escapeHtml(LABELS.modalCancel)}</button>
-        <button type="button" class="review-btn review-btn--primary" data-submit>${submitText}</button>
+        <button type="button" class="review-btn review-btn--primary" data-submit>${escapeHtml(submitText)}</button>
       </div>
     </div>`;
   document.body.appendChild(backdrop);
 
-  // Pre-popuni za edit mode
   backdrop.querySelector('textarea[name="comment"]').value = initComment;
   backdrop.querySelector('textarea[name="replacement"]').value = initReplacement;
 
@@ -511,8 +651,11 @@ function openModal(el, existingComment) {
         close();
         toast(LABELS.saved);
       } else {
+        // Chrome-anchored anchors get page='__chrome__' per
+        // commentable-everything.md §"Comment-write routing".
+        const isChrome = String(id).startsWith("chrome-");
         await submitComment({
-          page: computePageSlug(window.location.pathname),
+          page: isChrome ? "__chrome__" : state.pageSlug,
           anchor: id,
           comment,
           replacement,
@@ -521,7 +664,6 @@ function openModal(el, existingComment) {
         });
         close();
         toast(LABELS.saved);
-        // Otvori sidebar pa fokus ide na novi komentar
         const sb = document.querySelector(".review-sidebar");
         if (sb) {
           sb.classList.add("open");
@@ -543,6 +685,12 @@ function openModal(el, existingComment) {
     }
   });
 }
+
+// =================================================================
+// Lifecycle operations — per comment-lifecycle.md §"State transitions"
+// + firebase-rtdb-adapter.md §"Operations". New writes use the enum
+// directly; legacy boolean records are normalized by getStatus() on read.
+// =================================================================
 
 async function submitComment(data) {
   const app = initializeApp(cfg.FIREBASE_CONFIG, "review-mode-write");
@@ -595,9 +743,17 @@ async function editComment(commentId, fields) {
 async function deleteComment(commentId) {
   const app = initializeApp(cfg.FIREBASE_CONFIG, "review-mode-write");
   const db = getDatabase(app);
-  const cRef = ref(db, "comments/" + commentId);
-  // Realtime DB delete = update sa null
+  // RTDB delete = update with null
   await update(ref(db, "comments"), { [commentId]: null });
+}
+
+async function archiveComment(commentId) {
+  const app = initializeApp(cfg.FIREBASE_CONFIG, "review-mode-write");
+  const db = getDatabase(app);
+  await update(ref(db, "comments/" + commentId), {
+    status: "archived",
+    archived_at: Date.now(),
+  });
 }
 
 async function archiveComments(commentIds) {
@@ -612,7 +768,7 @@ async function archiveComments(commentIds) {
   await update(ref(db, "comments"), updates);
 }
 
-async function unarchiveComment(commentId) {
+async function restoreComment(commentId) {
   const app = initializeApp(cfg.FIREBASE_CONFIG, "review-mode-write");
   const db = getDatabase(app);
   await update(ref(db, "comments/" + commentId), {
@@ -638,6 +794,7 @@ function renderBanner() {
 function renderSidebar() {
   const sb = document.createElement("aside");
   sb.className = "review-sidebar";
+  // Three filter tabs per pending-archived-workflow.md §"Sidebar filter tabs".
   sb.innerHTML = `
     <header>
       <span>${escapeHtml(LABELS.sidebarTitle)}</span>
@@ -652,7 +809,8 @@ function renderSidebar() {
       <div class="empty">${escapeHtml(LABELS.noCommentsYet)}</div>
     </div>`;
 
-  // Sidebar toggle for narrow screens
+  // Sidebar toggle for narrow screens (shared label keys with the
+  // inert-page entry button per inert-entry-button.md §"Label resolution").
   const toggle = document.createElement("button");
   toggle.className = "review-sidebar-toggle";
   toggle.textContent = LABELS.toggleButton;
@@ -678,31 +836,6 @@ function renderCommentList() {
   if (!sb) return;
   const listEl = sb.querySelector("[data-list]");
   const countEl = sb.querySelector("[data-count]");
-  const filterMode = state.filter;  // "active" | "applied" | "archived"
-  // Group classification — per library/features/review-widget/pending-archived-workflow.md §"The model".
-  //   active   — group has >= 1 pending comment
-  //   applied  — all non-archived comments are applied (>= 1 applied, 0 pending)
-  //   archived — all comments archived
-  // Each comment belongs to exactly one filter group based on its anchor.
-  const groupsByAnchor = new Map();
-  for (const c of state.comments) {
-    const key = c.anchor || LABELS.noAnchorFallback;
-    if (!groupsByAnchor.has(key)) groupsByAnchor.set(key, []);
-    groupsByAnchor.get(key).push(c);
-  }
-  function classifyGroup(comments) {
-    const pending  = comments.filter(isPending).length;
-    const applied  = comments.filter(isApplied).length;
-    const archived = comments.filter(isArchived).length;
-    if (pending > 0) return "active";
-    if (applied > 0 && pending === 0) return "applied";
-    if (archived === comments.length) return "archived";
-    return "active";  // fallback
-  }
-  const filtered = state.comments.filter((c) => {
-    const groupComments = groupsByAnchor.get(c.anchor || LABELS.noAnchorFallback) || [];
-    return classifyGroup(groupComments) === filterMode;
-  });
 
   countEl.textContent = state.comments.length;
 
@@ -711,44 +844,49 @@ function renderCommentList() {
     return;
   }
 
-  if (!filtered.length) {
-    let msg;
-    if (filterMode === "archived") msg = LABELS.emptyArchive;
-    else if (filterMode === "applied") msg = LABELS.emptyApplied || LABELS.noActiveComments;
-    else msg = LABELS.noActiveComments;
-    listEl.innerHTML = `<div class="empty">${msg}</div>`;
-    return;
-  }
-
-  // Group comments by anchor. Within group: oldest first (natural reading
-  // order, replies follow original). Group order: most recent activity
-  // first (group sa najsvežijim komentarom ide na vrh).
+  // Group comments by anchor, then filter groups by the active filter-tab
+  // key via groupStatus() — per pending-archived-workflow.md §"State
+  // transitions at group level" + comment-lifecycle.md §"Vocabulary bridge".
   const groupsMap = new Map();
-  for (const c of filtered) {
+  for (const c of state.comments) {
     const key = c.anchor || LABELS.noAnchorFallback;
     if (!groupsMap.has(key)) groupsMap.set(key, []);
     groupsMap.get(key).push(c);
   }
-  const groups = Array.from(groupsMap.entries())
-    .map(([anchor, comments]) => ({
-      anchor,
-      comments: comments.slice().sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)),
-      latest: Math.max(...comments.map((c) => c.timestamp || c.archived_at || 0)),
-    }))
+
+  const allGroups = Array.from(groupsMap.entries()).map(([anchor, comments]) => ({
+    anchor,
+    comments: comments.slice().sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)),
+    status: groupStatus(comments),
+    latest: Math.max(...comments.map((c) => c.timestamp || c.archived_at || c.applied_at || 0)),
+  }));
+
+  const groups = allGroups
+    .filter((g) => g.status === state.filter)
     .sort((a, b) => b.latest - a.latest);
+
+  if (!groups.length) {
+    const msg = state.filter === "archived" ? LABELS.emptyArchive
+              : state.filter === "applied"  ? LABELS.emptyApplied
+              : LABELS.noActiveComments;
+    listEl.innerHTML = `<div class="empty">${escapeHtml(msg)}</div>`;
+    return;
+  }
 
   listEl.innerHTML = groups.map((group) => {
     const groupHTML = group.comments.map((c) => {
-      const status = getStatus(c);  // "pending" | "applied" | "archived"
+      const cStatus = getStatus(c);
       const when = c.timestamp ? new Date(c.timestamp).toLocaleString() : "";
-      const editedNote = c.edited_at ? ` &middot; ${escapeHtml(LABELS.editedPrefix)} ${new Date(c.edited_at).toLocaleString()}` : "";
-      const actions = renderActions(c.id, status);
+      const editedNote = c.edited_at
+        ? ` &middot; ${escapeHtml(LABELS.editedPrefix)} ${new Date(c.edited_at).toLocaleString()}`
+        : "";
+      const actions = renderActions(c.id, cStatus);
       return `
-        <div class="review-comment ${status}" data-comment="${c.id}" data-anchor="${escapeHtml(c.anchor || "")}">
+        <div class="review-comment ${escapeHtml(cStatus)}" data-comment="${escapeHtml(c.id)}" data-anchor="${escapeHtml(c.anchor || "")}">
           ${c.comment ? `<div class="text">${escapeHtml(c.comment)}</div>` : ""}
           ${c.replacement ? `<div class="replacement">${escapeHtml(c.replacement)}</div>` : ""}
           <div class="meta">
-            <span>${when}${editedNote}</span>
+            <span>${escapeHtml(when)}${editedNote}</span>
           </div>
           <div class="actions">${actions}</div>
         </div>`;
@@ -760,28 +898,27 @@ function renderCommentList() {
       ? `<div class="anchor-preview">"${escapeHtml(previewSlice)}${firstPreview.length > 100 ? "…" : ""}"</div>`
       : "";
     const n = group.comments.length;
-    
-    // Group-level status badge — per library/features/review-widget/pending-archived-workflow.md
-    // §"Status badges". Archived groups carry no badge (they only appear under the Archived
-    // filter); active groups carry .pending; all-applied groups carry .applied.
-    const groupStatus = classifyGroup(group.comments);
+
+    // Group-level status badge — per pending-archived-workflow.md §"Status
+    // badges". Archived groups carry no badge (they only appear under the
+    // Archived filter); active groups carry .pending; all-applied groups
+    // carry .applied.
     let statusBadge = "";
-    if (groupStatus === "active") {
+    if (group.status === "active") {
       statusBadge = `<span class="group-status pending">${escapeHtml(LABELS.statusPending)}</span>`;
-    } else if (groupStatus === "applied") {
+    } else if (group.status === "applied") {
       statusBadge = `<span class="group-status applied">${escapeHtml(LABELS.statusApplied)}</span>`;
     }
-    // archived groups: no badge (they only render under Archived filter)
-    // Note: nema „Mark as done" dugmeta — Claude trenutno
-    // jedini izvršava komentare (arhivira ih kroz drugi mehanizam,
-    // npr. direktan write u RTDB ili out-of-band akcija). Ako se
-    // ikad pojavi human-in-the-loop role-a koja arhivira ručno,
-    // archive funkcija je u JS-u (archiveComments), samo treba
-    // restore-ovati group footer markup ovde.
+
+    // Group footer — bulk-archive button. Suppressed in feedback-only mode
+    // per pending-archived-workflow.md §"Composition responsibilities".
+    // Also suppressed on the archived filter (no archive op meaningful).
+    // Prota runs feedback-only: Claude archives via RTDB out-of-band; no
+    // human-in-the-loop archive role uses the in-UI button.
     const groupFooter = "";
 
     return `
-      <div class="review-group ${groupStatus}" data-anchor="${escapeHtml(group.anchor)}">
+      <div class="review-group ${escapeHtml(group.status)}" data-anchor="${escapeHtml(group.anchor)}">
         <div class="review-group-header" data-anchor="${escapeHtml(group.anchor)}">
           <div class="anchor-row">
             <div class="anchor">${escapeHtml(group.anchor)}</div>
@@ -795,10 +932,10 @@ function renderCommentList() {
       </div>`;
   }).join("");
 
-  // Helper — scroll + spotlight (single source of truth)
+  // Helper — single-spotlight scroll + outline per spotlight-on-click.md.
   function spotlightAnchor(anchor) {
     const target = document.querySelector(`[data-comment-id="${cssEscape(anchor)}"]`);
-    if (!target) return;
+    if (!target) { toast(LABELS.elementGone); return; }
     target.scrollIntoView({ behavior: "smooth", block: "center" });
     document.querySelectorAll(".review-spotlit").forEach((el) => {
       el.classList.remove("review-spotlit");
@@ -812,14 +949,10 @@ function renderCommentList() {
     }, 4000);
   }
 
-  // Click on group header — scroll + spotlight
   listEl.querySelectorAll(".review-group-header").forEach((header) => {
-    header.addEventListener("click", () => {
-      spotlightAnchor(header.getAttribute("data-anchor"));
-    });
+    header.addEventListener("click", () => spotlightAnchor(header.getAttribute("data-anchor")));
   });
 
-  // Click on the comment row body (anywhere except buttons)
   listEl.querySelectorAll(".review-comment").forEach((row) => {
     row.addEventListener("click", (e) => {
       if (e.target.closest("button")) return;
@@ -827,41 +960,11 @@ function renderCommentList() {
     });
   });
 
-  // Per-comment Apply — pending -> applied
-  listEl.querySelectorAll("[data-action='apply']").forEach((btn) => {
-    btn.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      const id = btn.getAttribute("data-comment");
-      btn.disabled = true;
-      try {
-        await applyComment(id);
-        toast(LABELS.applied);
-      } catch (err) {
-        console.error("[review-mode] apply failed:", err);
-        toast(LABELS.errorPrefix + err.message);
-        btn.disabled = false;
-      }
-    });
-  });
-
-  // Per-comment Archive — pending/applied -> archived
-  listEl.querySelectorAll("[data-action='archive']").forEach((btn) => {
-    btn.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      const id = btn.getAttribute("data-comment");
-      btn.disabled = true;
-      try {
-        await archiveComments([id]);
-        toast(LABELS.archived);
-      } catch (err) {
-        console.error("[review-mode] archive failed:", err);
-        toast(LABELS.errorPrefix + err.message);
-        btn.disabled = false;
-      }
-    });
-  });
-
-  // Per-comment Edit
+  // Per-action button handlers — only the buttons actually rendered will
+  // match. `renderActions()` is the single source of truth for which
+  // buttons exist per (status, lifecycleMode). In feedback-only mode (prota
+  // default) the Apply / Archive selectors below match nothing because
+  // renderActions() doesn't emit those buttons.
   listEl.querySelectorAll("[data-action='edit']").forEach((btn) => {
     btn.addEventListener("click", async (e) => {
       e.stopPropagation();
@@ -869,15 +972,11 @@ function renderCommentList() {
       const comment = state.comments.find((c) => c.id === id);
       if (!comment) return;
       const anchorEl = document.querySelector(`[data-comment-id="${cssEscape(comment.anchor)}"]`);
-      if (!anchorEl) {
-        toast(LABELS.elementGone);
-        return;
-      }
+      if (!anchorEl) { toast(LABELS.elementGone); return; }
       openModal(anchorEl, comment);
     });
   });
 
-  // Per-comment Delete
   listEl.querySelectorAll("[data-action='delete']").forEach((btn) => {
     btn.addEventListener("click", async (e) => {
       e.stopPropagation();
@@ -895,15 +994,14 @@ function renderCommentList() {
     });
   });
 
-  // Per-comment Restore (samo u arhivi)
   listEl.querySelectorAll("[data-action='restore']").forEach((btn) => {
     btn.addEventListener("click", async (e) => {
       e.stopPropagation();
       const id = btn.getAttribute("data-comment");
       btn.disabled = true;
       try {
-        await unarchiveComment(id);
-        toast(LABELS.restoredToPending);
+        await restoreComment(id);
+        toast(LABELS.restoredToPending || LABELS.restoredToActive);
       } catch (err) {
         console.error("[review-mode] restore failed:", err);
         toast(LABELS.errorPrefix + err.message);
@@ -912,26 +1010,84 @@ function renderCommentList() {
     });
   });
 
-  // Note: nema „archive-group-btn" handler-a jer ne render-ujemo button.
-  // archiveComments() funkcija ostaje u modulu — Claude (ili future
-  // human-in-the-loop role-a) je može pozvati direktno preko window.__review
-  // ili out-of-band Firebase write.
+  listEl.querySelectorAll("[data-action='apply']").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const id = btn.getAttribute("data-comment");
+      btn.disabled = true;
+      try {
+        await applyComment(id);
+        toast(LABELS.applied);
+      } catch (err) {
+        console.error("[review-mode] apply failed:", err);
+        toast(LABELS.errorPrefix + err.message);
+        btn.disabled = false;
+      }
+    });
+  });
+
+  listEl.querySelectorAll("[data-action='archive']").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const id = btn.getAttribute("data-comment");
+      btn.disabled = true;
+      try {
+        await archiveComment(id);
+        toast(LABELS.archived);
+      } catch (err) {
+        console.error("[review-mode] archive failed:", err);
+        toast(LABELS.errorPrefix + err.message);
+        btn.disabled = false;
+      }
+    });
+  });
 }
 
 function renderActions(id, status) {
-  // Per-status button matrix per
-  // library/features/review-widget/comment-lifecycle.md §"Per-comment actions in the sidebar".
-  //   pending  → Apply, Edit, Archive, Delete
-  //   applied  → Restore, Archive, Delete
-  //   archived → Restore, Delete
-  const apply   = `<button data-comment="${id}" data-action="apply"   class="apply-btn"   title="${escapeHtml(LABELS.applyTitle)}">&#10004; ${escapeHtml(LABELS.applyLabel)}</button>`;
-  const edit    = `<button data-comment="${id}" data-action="edit"    class="edit-btn"    title="${escapeHtml(LABELS.editTitle)}">&#9998; ${escapeHtml(LABELS.editLabel)}</button>`;
-  const archive = `<button data-comment="${id}" data-action="archive" class="archive-btn" title="${escapeHtml(LABELS.archiveTitle)}">&#128450; ${escapeHtml(LABELS.archiveLabel)}</button>`;
-  const restore = `<button data-comment="${id}" data-action="restore" class="restore-btn" title="${escapeHtml(LABELS.restoreTitle)}">&#8634; ${escapeHtml(LABELS.restoreLabel)}</button>`;
-  const del     = `<button data-comment="${id}" data-action="delete"  class="delete-btn"  title="${escapeHtml(LABELS.deleteTitle)}">&#10005; ${escapeHtml(LABELS.deleteLabel)}</button>`;
-  if (status === "archived") return restore + del;
-  if (status === "applied")  return restore + archive + del;
-  return apply + edit + archive + del;  // pending (default)
+  // Per comment-lifecycle.md §"Per-comment actions in the sidebar":
+  //
+  //   commentLifecycleMode: 'full' (review-board workflow)
+  //     pending:  Apply, Edit, Archive, Delete
+  //     applied:  Restore, Archive, Delete
+  //     archived: Restore, Delete
+  //
+  //   commentLifecycleMode: 'feedback-only' (Claude-as-operator workflow)
+  //     pending:  Edit, Delete
+  //     applied:  Restore, Delete
+  //     archived: Restore, Delete
+  //
+  // The buttons that DO render carry per-action suffix classes per
+  // css-isolation.md §"Per-action suffix classes" so each gets distinct
+  // hover styling.
+
+  const btn = (action, klass, label, title, glyph) =>
+    `<button data-comment="${escapeHtml(id)}" data-action="${action}" class="${klass}" title="${escapeHtml(title)}">${glyph} ${escapeHtml(label)}</button>`;
+
+  if (isFeedbackOnly) {
+    if (status === "pending") {
+      return btn("edit", "edit-btn", LABELS.editLabel, LABELS.editTitle, "&#9998;") +
+             btn("delete", "delete-btn", LABELS.deleteLabel, LABELS.deleteTitle, "&#10005;");
+    }
+    // applied or archived
+    return btn("restore", "restore-btn", LABELS.restoreLabel, LABELS.restoreTitle, "&#8634;") +
+           btn("delete", "delete-btn", LABELS.deleteLabel, LABELS.deleteTitle, "&#10005;");
+  }
+
+  // 'full' mode
+  if (status === "pending") {
+    return btn("apply", "apply-btn", LABELS.applyLabel, LABELS.applyTitle, "&#10003;") +
+           btn("edit", "edit-btn", LABELS.editLabel, LABELS.editTitle, "&#9998;") +
+           btn("archive", "archive-btn", LABELS.archiveLabel, LABELS.archiveTitle, "&#128451;") +
+           btn("delete", "delete-btn", LABELS.deleteLabel, LABELS.deleteTitle, "&#10005;");
+  }
+  if (status === "applied") {
+    return btn("restore", "restore-btn", LABELS.restoreLabel, LABELS.restoreTitle, "&#8634;") +
+           btn("archive", "archive-btn", LABELS.archiveLabel, LABELS.archiveTitle, "&#128451;") +
+           btn("delete", "delete-btn", LABELS.deleteLabel, LABELS.deleteTitle, "&#10005;");
+  }
+  // archived
+  return btn("restore", "restore-btn", LABELS.restoreLabel, LABELS.restoreTitle, "&#8634;") +
+         btn("delete", "delete-btn", LABELS.deleteLabel, LABELS.deleteTitle, "&#10005;");
 }
 
 // =================================================================
@@ -940,7 +1096,7 @@ function renderActions(id, status) {
 
 function escapeHtml(str) {
   const div = document.createElement("div");
-  div.textContent = String(str || "");
+  div.textContent = String(str == null ? "" : str);
   return div.innerHTML;
 }
 

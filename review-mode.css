@@ -718,26 +718,31 @@ html[data-review-mode="on"] .review-comment .actions button:hover {
   color: var(--review-primary-deep);
 }
 html[data-review-mode="on"] .review-comment .actions button.apply-btn:hover {
+  /* accent-cool (sage) tint — per css-isolation.md §"Per-action suffix classes" */
   background: var(--review-accent-cool-low);
   border-color: var(--review-accent-cool);
   color: var(--review-neutral-deep);
 }
 html[data-review-mode="on"] .review-comment .actions button.edit-btn:hover {
+  /* primary-deep tint */
   background: #d1fae5;
   border-color: var(--review-primary-deep);
   color: var(--review-primary-deep);
 }
 html[data-review-mode="on"] .review-comment .actions button.archive-btn:hover {
+  /* muted tint — neutral, no emphasis */
   background: var(--review-surface-tint);
   border-color: var(--review-rule);
   color: var(--review-text-muted);
 }
 html[data-review-mode="on"] .review-comment .actions button.restore-btn:hover {
+  /* surface-tint */
   background: var(--review-surface-tint);
   border-color: var(--review-text-muted);
   color: var(--review-neutral-deep);
 }
 html[data-review-mode="on"] .review-comment .actions button.delete-btn:hover {
+  /* feedback-red tint */
   background: var(--review-replacement-bg);
   border-color: var(--review-replacement-text);
   color: var(--review-replacement-text);
